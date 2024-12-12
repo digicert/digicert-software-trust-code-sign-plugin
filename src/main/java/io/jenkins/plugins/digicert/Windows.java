@@ -10,6 +10,25 @@
 
 package io.jenkins.plugins.digicert;
 
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.Arrays;
+import java.util.List;
+import java.util.ListIterator;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Properties;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
 import hudson.EnvVars;
 import hudson.model.TaskListener;
 import hudson.slaves.EnvironmentVariablesNodeProperty;
@@ -17,24 +36,6 @@ import hudson.slaves.NodeProperty;
 import hudson.slaves.NodePropertyDescriptor;
 import hudson.util.DescribableList;
 import jenkins.model.Jenkins;
-import java.io.File;
-import java.io.IOException;
-import java.io.BufferedReader;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.FileOutputStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.charset.StandardCharsets;
-import java.util.Map;
-import java.util.ListIterator;
-import java.util.Arrays;
-import java.util.Optional;
-import java.util.List;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
-import java.util.Properties;
 
 public class Windows {
     private final TaskListener listener;
@@ -51,7 +52,8 @@ public class Windows {
     ProcessBuilder processBuilder = new ProcessBuilder();
     private Integer result;
 
-    public Windows(TaskListener listener, String SM_HOST, String SM_API_KEY, String SM_CLIENT_CERT_FILE, String SM_CLIENT_CERT_PASSWORD, String pathVar) {
+    public Windows(TaskListener listener, String SM_HOST, String SM_API_KEY, String SM_CLIENT_CERT_FILE,
+            String SM_CLIENT_CERT_PASSWORD, String pathVar) {
         this.listener = listener;
         this.SM_HOST = SM_HOST;
         this.SM_API_KEY = SM_API_KEY;
@@ -62,11 +64,15 @@ public class Windows {
 
     public Integer install(String os) {
         this.listener.getLogger().println("\nAgent type: " + os);
-        this.listener.getLogger().println("\nInstalling SMCTL from: https://" + SM_HOST.substring(19).replaceAll("/$", "") + "/signingmanager/api-ui/v1/releases/noauth/smtools-windows-x64.msi/download \n");
-        executeCommand("curl -X GET  https://" + SM_HOST.substring(19).replaceAll("/$", "") + "/signingmanager/api-ui/v1/releases/noauth/smtools-windows-x64.msi/download -o smtools-windows-x64.msi");
+        this.listener.getLogger()
+                .println("\nInstalling SMCTL from: https://" + SM_HOST.substring(19).replaceAll("/$", "")
+                        + "/signingmanager/api-ui/v1/releases/noauth/smtools-windows-x64.msi/download \n");
+        executeCommand("curl -X GET  https://" + SM_HOST.substring(19).replaceAll("/$", "")
+                + "/signingmanager/api-ui/v1/releases/noauth/smtools-windows-x64.msi/download -o smtools-windows-x64.msi");
         result = executeCommand("msiexec /i smtools-windows-x64.msi /quiet /qn");
         if (SM_API_KEY != null && SM_CLIENT_CERT_FILE != null && SM_CLIENT_CERT_PASSWORD != null) {
-            executeCommand("C:\\Windows\\System32\\certutil.exe -csp \"DigiCert Signing Manager KSP\" -key -user > NUL 2> NUL");
+            executeCommand(
+                    "C:\\Windows\\System32\\certutil.exe -csp \"DigiCert Signing Manager KSP\" -key -user > NUL 2> NUL");
             executeCommand("smksp_cert_sync.exe > NUL 2> NUL");
             executeCommand("smctl windows certsync > NUL 2> NUL");
         }
@@ -75,20 +81,20 @@ public class Windows {
 
     public Integer createFile(String path, String str) {
 
-        File file = new File(path); //initialize File object and passing path as argument
+        File file = new File(path); // initialize File object and passing path as argument
         FileOutputStream fos = null;
         try {
-            if(!file.createNewFile())
+            if (!file.createNewFile())
                 ;
             try {
                 String name = file.getCanonicalPath();
-                fos = new FileOutputStream(name, false);  // true for append mode
-                byte[] b = str.getBytes(StandardCharsets.UTF_8);       //converts string into bytes
-                fos.write(b);           //writes bytes into file
-                fos.close();            //close the file
+                fos = new FileOutputStream(name, false); // true for append mode
+                byte[] b = str.getBytes(StandardCharsets.UTF_8); // converts string into bytes
+                fos.write(b); // writes bytes into file
+                fos.close(); // close the file
                 return 0;
             } catch (Exception e) {
-                if (fos!=null)
+                if (fos != null)
                     fos.close();
                 e.printStackTrace(this.listener.error(e.getMessage()));
                 return 1;
@@ -104,9 +110,7 @@ public class Windows {
         List<Path> result;
         try (Stream<Path> pathStream = Files.find(path,
                 Integer.MAX_VALUE,
-                (p, basicFileAttributes) ->
-                        p.getFileName().toString().equalsIgnoreCase(fileName))
-        ) {
+                (p, basicFileAttributes) -> p.getFileName().toString().equalsIgnoreCase(fileName))) {
             result = pathStream.collect(Collectors.toList());
         }
         return result;
@@ -126,13 +130,12 @@ public class Windows {
             return "";
         }
         Path parentFolder = Paths.get(signtoolFolder);
-        Optional<File> mostRecentFolder =
-                Arrays
-                        .stream(parentFolder.toFile().listFiles())
-                        .filter(f -> f.isDirectory())
-                        .max(
-                                (f1, f2) -> Long.compare(f1.lastModified(),
-                                        f2.lastModified()));
+        Optional<File> mostRecentFolder = Arrays
+                .stream(parentFolder.toFile().listFiles())
+                .filter(f -> f.isDirectory())
+                .max(
+                        (f1, f2) -> Long.compare(f1.lastModified(),
+                                f2.lastModified()));
         if (mostRecentFolder.isPresent()) {
             File mostRecent = mostRecentFolder.get();
             return mostRecent.getPath();
@@ -146,8 +149,10 @@ public class Windows {
         try {
             Jenkins instance = Jenkins.get();
 
-            DescribableList<NodeProperty<?>, NodePropertyDescriptor> globalNodeProperties = instance.getGlobalNodeProperties();
-            List<EnvironmentVariablesNodeProperty> envVarsNodePropertyList = globalNodeProperties.getAll(EnvironmentVariablesNodeProperty.class);
+            DescribableList<NodeProperty<?>, NodePropertyDescriptor> globalNodeProperties = instance
+                    .getGlobalNodeProperties();
+            List<EnvironmentVariablesNodeProperty> envVarsNodePropertyList = globalNodeProperties
+                    .getAll(EnvironmentVariablesNodeProperty.class);
 
             EnvironmentVariablesNodeProperty newEnvVarsNodeProperty = null;
             EnvVars envVars = null;
@@ -172,19 +177,21 @@ public class Windows {
             processBuilder.command(prompt, c + "c", command);
             Map<String, String> env = processBuilder.environment();
             if (SM_API_KEY != null)
-                env.put("SM_API_KEY", SM_API_KEY);
+                env.put(Constants.API_KEY_ID, SM_API_KEY);
             if (SM_CLIENT_CERT_PASSWORD != null)
-                env.put("SM_CLIENT_CERT_PASSWORD", SM_CLIENT_CERT_PASSWORD);
+                env.put(Constants.CLIENT_CERT_PASSWORD_ID, SM_CLIENT_CERT_PASSWORD);
             if (SM_CLIENT_CERT_FILE != null)
-                env.put("SM_CLIENT_CERT_FILE", SM_CLIENT_CERT_FILE);
+                env.put(Constants.CLIENT_CERT_FILE_ID, SM_CLIENT_CERT_FILE);
             if (SM_HOST != null)
-                env.put("SM_HOST", SM_HOST);
-            env.put("path", System.getenv("path") + ";C:\\Program Files\\DigiCert\\DigiCert One Signing Manager Tools;");
+                env.put(Constants.HOST_ID, SM_HOST);
+            env.put("path",
+                    System.getenv("path") + ";C:\\Program Files\\DigiCert\\DigiCert One Signing Manager Tools;");
             processBuilder.directory(new File(dir));
             processBuilder.redirectErrorStream(true);
             Process process = processBuilder.start();
 
-            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(),StandardCharsets.UTF_8));
+            BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
 
             String line;
 
@@ -210,7 +217,8 @@ public class Windows {
         String nugetUrl;
         String signtoolUrl;
         try {
-            this.listener.getLogger().println("\nInstalling and configuring signing tools - Jarsigner, Signtool and Nuget\n");
+            this.listener.getLogger()
+                    .println("\nInstalling and configuring signing tools - Jarsigner, Signtool and Nuget\n");
             // Windows.class.getResource("config.properties");
             try (InputStream input = Windows.class.getResourceAsStream("config.properties")) {
 
@@ -219,9 +227,9 @@ public class Windows {
                 prop.load(input);
 
                 nugetUrl = prop.getProperty("nugetUrl");
-//                this.listener.getLogger().println(prop.getProperty("nugetUrl"));
+                // this.listener.getLogger().println(prop.getProperty("nugetUrl"));
                 signtoolUrl = prop.getProperty("signtoolUrl");
-//                this.listener.getLogger().println(prop.getProperty("signtoolUrl"));
+                // this.listener.getLogger().println(prop.getProperty("signtoolUrl"));
             } catch (IOException e) {
                 e.printStackTrace(this.listener.error(e.getMessage()));
                 return 1;
@@ -288,7 +296,8 @@ public class Windows {
         this.listener.getLogger().println("\nCreating PKCS11 Config File\n");
 
         String str = "name=signingmanager\n" +
-                "library = \"C:\\\\Program Files\\\\DigiCert\\\\DigiCert One Signing Manager Tools\\\\smpkcs11.dll\"\n" +
+                "library = \"C:\\\\Program Files\\\\DigiCert\\\\DigiCert One Signing Manager Tools\\\\smpkcs11.dll\"\n"
+                +
                 "slotListIndex=0\n";
 
         String configPath;
@@ -306,15 +315,15 @@ public class Windows {
         result = createFile(configPath, str);
 
         if (result == 0)
-            this.listener.getLogger().println("\nPKCS11 config file successfully created at location: " + configPath + "\n");
+            this.listener.getLogger()
+                    .println("\nPKCS11 config file successfully created at location: " + configPath + "\n");
         else {
             this.listener.getLogger().println("\nFailed to create PKCS11 config file\n");
             return result;
         }
 
-        //signing
+        // signing
         result = signing();
         return result;
     }
 }
-

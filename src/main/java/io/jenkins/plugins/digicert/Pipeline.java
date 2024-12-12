@@ -10,21 +10,34 @@
 
 package io.jenkins.plugins.digicert;
 
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ExecutionException;
+
+import org.jenkinsci.plugins.plaincredentials.StringCredentials;
+import org.jenkinsci.plugins.workflow.steps.Step;
+import org.jenkinsci.plugins.workflow.steps.StepContext;
+import org.jenkinsci.plugins.workflow.steps.StepDescriptor;
+import org.jenkinsci.plugins.workflow.steps.StepExecution;
+import org.jenkinsci.plugins.workflow.steps.SynchronousNonBlockingStepExecution;
+import org.kohsuke.stapler.DataBoundConstructor;
+
+import com.cloudbees.plugins.credentials.CredentialsMatchers;
+import com.cloudbees.plugins.credentials.CredentialsProvider;
+import com.cloudbees.plugins.credentials.common.StandardCredentials;
 import com.google.common.collect.ImmutableSet;
+
 import hudson.EnvVars;
 import hudson.Extension;
 import hudson.FilePath;
 import hudson.model.Run;
 import hudson.model.TaskListener;
 import hudson.remoting.VirtualChannel;
-import org.jenkinsci.plugins.workflow.steps.*;
-import org.kohsuke.stapler.DataBoundConstructor;
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.InputStream;
-import java.io.IOException;
-import java.util.Set;
-import java.util.concurrent.ExecutionException;
+import hudson.security.ACL;
+import jenkins.model.Jenkins;
 
 public class Pipeline extends Step {
 
@@ -56,7 +69,51 @@ public class Pipeline extends Step {
             VirtualChannel virtualChannel = filePath.getChannel();
             assert virtualChannel != null;
 
-            virtualChannel.callAsync(new AgentInfo(listener, envVars)).get();
+            Map<String, String> credentialLookup = stmCredentialLookup();
+
+            virtualChannel.callAsync(new AgentInfo(listener, envVars, credentialLookup)).get();
+            return null;
+        }
+
+        private Map<String, String> stmCredentialLookup() {
+            String host = getCredential(Constants.HOST_ID);
+            String apiKey = getCredential(Constants.API_KEY_ID);
+            String clientCertFile = getCredential(Constants.CLIENT_CERT_FILE_ID);
+            String clientCertPassword = getCredential(Constants.CLIENT_CERT_PASSWORD_ID);
+
+            Map<String, String> map = new HashMap<String, String>();
+
+            if (null != host) {
+                map.put(Constants.HOST_ID, host);
+            }
+
+            if (null != apiKey) {
+                map.put(Constants.API_KEY_ID, apiKey);
+            }
+
+            if (null != clientCertFile) {
+                map.put(Constants.CLIENT_CERT_FILE_ID, clientCertFile);
+            }
+
+            if (null != clientCertPassword) {
+                map.put(Constants.CLIENT_CERT_PASSWORD_ID, clientCertPassword);
+            }
+
+            return map;
+        }
+
+        private String getCredential(String credentialID) {
+            StandardCredentials credential = CredentialsMatchers.firstOrNull(
+                    CredentialsProvider.lookupCredentials(StandardCredentials.class, Jenkins.get(), ACL.SYSTEM,
+                            List.of()),
+                    CredentialsMatchers.withId(credentialID));
+
+            if (credential != null) {
+                if (credential instanceof StringCredentials) {
+                    return ((StringCredentials) credential).getSecret().getPlainText();
+                }
+            }
+
             return null;
         }
     }

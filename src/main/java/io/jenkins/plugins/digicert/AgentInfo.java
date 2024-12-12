@@ -10,17 +10,11 @@
 
 package io.jenkins.plugins.digicert;
 
-import com.cloudbees.plugins.credentials.CredentialsMatchers;
-import com.cloudbees.plugins.credentials.CredentialsProvider;
-import com.cloudbees.plugins.credentials.common.StandardCredentials;
-import com.cloudbees.plugins.credentials.domains.DomainRequirement;
+import java.util.Map;
+
 import hudson.EnvVars;
 import hudson.model.TaskListener;
-import hudson.security.ACL;
-import jenkins.model.Jenkins;
 import jenkins.security.MasterToSlaveCallable;
-import org.jenkinsci.plugins.plaincredentials.StringCredentials;
-import java.util.ArrayList;
 
 public class AgentInfo extends MasterToSlaveCallable<Boolean, Throwable> {
     private final TaskListener listener;
@@ -33,46 +27,42 @@ public class AgentInfo extends MasterToSlaveCallable<Boolean, Throwable> {
     private String SM_CLIENT_CERT_PASSWORD;
     private String path;
     private Integer result;
+    private Map<String, String> credentialLookup;
 
-    public AgentInfo(TaskListener listener, EnvVars env) {
+    public AgentInfo(TaskListener listener, EnvVars env, Map<String, String> credentialLookup) {
         this.listener = listener;
         this.env = env;
-    }
-
-    public StandardCredentials getCredential(String credentialID) {
-        return CredentialsMatchers.firstOrNull(
-                CredentialsProvider
-                        .lookupCredentials(StandardCredentials.class, Jenkins.get(), ACL.SYSTEM, new ArrayList<DomainRequirement>()),
-                CredentialsMatchers.withId(credentialID)
-        );
+        this.credentialLookup = credentialLookup;
     }
 
     public String getValue(String credentialID) {
-        StandardCredentials credentials = getCredential(credentialID);
-        if (credentials != null) {
-            if (credentials instanceof StringCredentials) {
-                return ((StringCredentials) credentials).getSecret().getPlainText();
-            }
+        String envCredential = env.get(credentialID) != null ? env.get(credentialID)
+                : System.getenv(credentialID);
+
+        if (envCredential != null) {
+            return envCredential;
+        } else {
+            return credentialLookup.get(credentialID);
         }
-        return env.get(credentialID) != null ? env.get(credentialID) : System.getenv(credentialID);
     }
 
     public Boolean call() throws Throwable {
 
         String os = System.getProperty("os.name");
 
-        SM_HOST = getValue("SM_HOST");
-        SM_API_KEY = getValue("SM_API_KEY");
-        SM_CLIENT_CERT_FILE = getValue("SM_CLIENT_CERT_FILE");
-        SM_CLIENT_CERT_PASSWORD = getValue("SM_CLIENT_CERT_PASSWORD");
+        SM_HOST = getValue(Constants.HOST_ID);
+        SM_API_KEY = getValue(Constants.API_KEY_ID);
+        SM_CLIENT_CERT_FILE = getValue(Constants.CLIENT_CERT_FILE_ID);
+        SM_CLIENT_CERT_PASSWORD = getValue(Constants.CLIENT_CERT_PASSWORD_ID);
         path = env.get("path") != null ? env.get("path") : System.getenv("path");
 
-
         if (os.toLowerCase().contains("windows")) {
-            Windows w = new Windows(this.listener, this.SM_HOST, this.SM_API_KEY, this.SM_CLIENT_CERT_FILE, this.SM_CLIENT_CERT_PASSWORD, this.path);
+            Windows w = new Windows(this.listener, this.SM_HOST, this.SM_API_KEY, this.SM_CLIENT_CERT_FILE,
+                    this.SM_CLIENT_CERT_PASSWORD, this.path);
             result = w.call(os);
         } else {
-            Linux l = new Linux(this.listener, this.SM_HOST, this.SM_API_KEY, this.SM_CLIENT_CERT_FILE, this.SM_CLIENT_CERT_PASSWORD, this.path);
+            Linux l = new Linux(this.listener, this.SM_HOST, this.SM_API_KEY, this.SM_CLIENT_CERT_FILE,
+                    this.SM_CLIENT_CERT_PASSWORD, this.path);
             result = l.call(os);
         }
         if (result == 1)

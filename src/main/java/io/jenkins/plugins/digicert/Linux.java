@@ -10,6 +10,17 @@
 
 package io.jenkins.plugins.digicert;
 
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+
 import hudson.EnvVars;
 import hudson.model.TaskListener;
 import hudson.slaves.EnvironmentVariablesNodeProperty;
@@ -17,16 +28,6 @@ import hudson.slaves.NodeProperty;
 import hudson.slaves.NodePropertyDescriptor;
 import hudson.util.DescribableList;
 import jenkins.model.Jenkins;
-import java.io.File;
-import java.io.IOException;
-import java.io.BufferedReader;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.FileOutputStream;
-import java.nio.charset.StandardCharsets;
-import java.util.List;
-import java.util.Map;
-import java.util.Properties;
 
 public class Linux {
     private final TaskListener listener;
@@ -43,7 +44,8 @@ public class Linux {
     ProcessBuilder processBuilder = new ProcessBuilder();
     private Integer result;
 
-    public Linux(TaskListener listener, String SM_HOST, String SM_API_KEY, String SM_CLIENT_CERT_FILE, String SM_CLIENT_CERT_PASSWORD, String pathVar) {
+    public Linux(TaskListener listener, String SM_HOST, String SM_API_KEY, String SM_CLIENT_CERT_FILE,
+            String SM_CLIENT_CERT_PASSWORD, String pathVar) {
         this.listener = listener;
         this.SM_HOST = SM_HOST;
         this.SM_API_KEY = SM_API_KEY;
@@ -54,8 +56,11 @@ public class Linux {
 
     public Integer install(String os) {
         this.listener.getLogger().println("\nAgent type: " + os);
-        this.listener.getLogger().println("\nIstalling SMCTL from: https://" + SM_HOST.substring(19).replaceAll("/$", "") + "/signingmanager/api-ui/v1/releases/noauth/smtools-linux-x64.tar.gz/download \n");
-        executeCommand("curl -X GET https://" + SM_HOST.substring(19).replaceAll("/$", "") + "/signingmanager/api-ui/v1/releases/noauth/smtools-linux-x64.tar.gz/download/ -o smtools-linux-x64.tar.gz");
+        this.listener.getLogger()
+                .println("\nIstalling SMCTL from: https://" + SM_HOST.substring(19).replaceAll("/$", "")
+                        + "/signingmanager/api-ui/v1/releases/noauth/smtools-linux-x64.tar.gz/download \n");
+        executeCommand("curl -X GET https://" + SM_HOST.substring(19).replaceAll("/$", "")
+                + "/signingmanager/api-ui/v1/releases/noauth/smtools-linux-x64.tar.gz/download/ -o smtools-linux-x64.tar.gz");
         result = executeCommand("tar xvf smtools-linux-x64.tar.gz > /dev/null");
         dir = dir + File.separator + "smtools-linux-x64";
         return result;
@@ -63,20 +68,20 @@ public class Linux {
 
     public Integer createFile(String path, String str) {
 
-        File file = new File(path); //initialize File object and passing path as argument
+        File file = new File(path); // initialize File object and passing path as argument
         FileOutputStream fos = null;
         try {
-            if(!file.createNewFile())  //creates a new file
+            if (!file.createNewFile()) // creates a new file
                 ;
             try {
                 String name = file.getCanonicalPath();
-                fos = new FileOutputStream(name, false);  // true for append mode
-                byte[] b = str.getBytes(StandardCharsets.UTF_8);       //converts string into bytes
-                fos.write(b);           //writes bytes into file
-                fos.close();            //close the file
+                fos = new FileOutputStream(name, false); // true for append mode
+                byte[] b = str.getBytes(StandardCharsets.UTF_8); // converts string into bytes
+                fos.write(b); // writes bytes into file
+                fos.close(); // close the file
                 return 0;
             } catch (IOException e) {
-                if (fos!=null)
+                if (fos != null)
                     fos.close();
                 e.printStackTrace(this.listener.error(e.getMessage()));
                 return 1;
@@ -91,8 +96,10 @@ public class Linux {
         try {
             Jenkins instance = Jenkins.get();
 
-            DescribableList<NodeProperty<?>, NodePropertyDescriptor> globalNodeProperties = instance.getGlobalNodeProperties();
-            List<EnvironmentVariablesNodeProperty> envVarsNodePropertyList = globalNodeProperties.getAll(EnvironmentVariablesNodeProperty.class);
+            DescribableList<NodeProperty<?>, NodePropertyDescriptor> globalNodeProperties = instance
+                    .getGlobalNodeProperties();
+            List<EnvironmentVariablesNodeProperty> envVarsNodePropertyList = globalNodeProperties
+                    .getAll(EnvironmentVariablesNodeProperty.class);
 
             EnvironmentVariablesNodeProperty newEnvVarsNodeProperty = null;
             EnvVars envVars = null;
@@ -102,7 +109,7 @@ public class Linux {
                 globalNodeProperties.add(newEnvVarsNodeProperty);
                 envVars = newEnvVarsNodeProperty.getEnvVars();
             } else {
-                //We do have a envVars List
+                // We do have a envVars List
                 envVars = envVarsNodePropertyList.get(0).getEnvVars();
             }
             envVars.put(key, value);
@@ -119,19 +126,18 @@ public class Linux {
             input = Linux.class.getResourceAsStream("config.properties");
             Properties prop = new Properties();
 
-            //load a properties file from class path, inside static method
+            // load a properties file from class path, inside static method
             prop.load(input);
 
-            //get the property value and print it out
+            // get the property value and print it out
             jsignUrl = prop.getProperty("jsignUrl");
             input.close();
-            //this.listener.getLogger().println(prop.getProperty("jsignUrl"));
+            // this.listener.getLogger().println(prop.getProperty("jsignUrl"));
         } catch (Exception e) {
             try {
-                if(input != null)
+                if (input != null)
                     input.close();
-            }
-            catch(IOException ex) {
+            } catch (IOException ex) {
                 ex.printStackTrace(this.listener.error(ex.getMessage()));
                 return 1;
             }
@@ -140,7 +146,8 @@ public class Linux {
         }
         try {
             this.listener.getLogger().println("\nInstalling and configuring signing tools - Jarsigner and Jsign\n");
-            result = executeCommand("curl -fSslL " + jsignUrl + " -o jsign.deb && sudo dpkg --install jsign.deb > /dev/null");
+            result = executeCommand(
+                    "curl -fSslL " + jsignUrl + " -o jsign.deb && sudo dpkg --install jsign.deb > /dev/null");
             if (result == 0)
                 this.listener.getLogger().println("\nJsign successfully installed\n");
             else {
@@ -169,19 +176,20 @@ public class Linux {
             processBuilder.command(prompt, c + "c", command);
             Map<String, String> env = processBuilder.environment();
             if (SM_API_KEY != null)
-                env.put("SM_API_KEY", SM_API_KEY);
+                env.put(Constants.API_KEY_ID, SM_API_KEY);
             if (SM_CLIENT_CERT_PASSWORD != null)
-                env.put("SM_CLIENT_CERT_PASSWORD", SM_CLIENT_CERT_PASSWORD);
+                env.put(Constants.CLIENT_CERT_PASSWORD_ID, SM_CLIENT_CERT_PASSWORD);
             if (SM_CLIENT_CERT_FILE != null)
-                env.put("SM_CLIENT_CERT_FILE", SM_CLIENT_CERT_FILE);
+                env.put(Constants.CLIENT_CERT_FILE_ID, SM_CLIENT_CERT_FILE);
             if (SM_HOST != null)
-                env.put("SM_HOST", SM_HOST);
+                env.put(Constants.HOST_ID, SM_HOST);
             env.put("PATH", System.getenv("PATH") + ":/" + dir + "/smtools-linux-x64/");
             processBuilder.directory(new File(dir));
             processBuilder.redirectErrorStream(true);
             Process process = processBuilder.start();
 
-            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(),StandardCharsets.UTF_8));
+            BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
 
             String line;
 
@@ -222,13 +230,14 @@ public class Linux {
         result = createFile(configPath, str);
 
         if (result == 0)
-            this.listener.getLogger().println("\nPKCS11 config file successfully created at location: " + configPath + "\n");
+            this.listener.getLogger()
+                    .println("\nPKCS11 config file successfully created at location: " + configPath + "\n");
         else {
             this.listener.getLogger().println("\nFailed to create PKCS11 config file\n");
             return result;
         }
 
-        //signing
+        // signing
         result = signing();
         return result;
     }
