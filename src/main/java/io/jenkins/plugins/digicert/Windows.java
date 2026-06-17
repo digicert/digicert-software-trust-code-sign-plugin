@@ -12,105 +12,144 @@ package io.jenkins.plugins.digicert;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.List;
-import java.util.ListIterator;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Properties;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import java.nio.file.Files;
 
-import hudson.EnvVars;
 import hudson.model.TaskListener;
-import hudson.slaves.EnvironmentVariablesNodeProperty;
-import hudson.slaves.NodeProperty;
-import hudson.slaves.NodePropertyDescriptor;
-import hudson.util.DescribableList;
-import jenkins.model.Jenkins;
+import hudson.util.Secret;
 
-public class Windows {
-    private final TaskListener listener;
-    private final String SM_HOST;
-    // lgtm[jenkins/plaintext-storage]
-    private final String SM_API_KEY;
-    private final String SM_CLIENT_CERT_FILE;
-    // lgtm[jenkins/plaintext-storage]
-    private final String SM_CLIENT_CERT_PASSWORD;
-    private final String pathVar;
-    private final String prompt = "cmd.exe";
-    private final char c = '/';
-    String dir = System.getProperty("user.dir");
-    ProcessBuilder processBuilder = new ProcessBuilder();
-    private Integer result;
+public class Windows extends BaseAgent {
 
-    public Windows(TaskListener listener, String SM_HOST, String SM_API_KEY, String SM_CLIENT_CERT_FILE,
-            String SM_CLIENT_CERT_PASSWORD, String pathVar) {
-        this.listener = listener;
-        this.SM_HOST = SM_HOST;
-        this.SM_API_KEY = SM_API_KEY;
-        this.SM_CLIENT_CERT_FILE = SM_CLIENT_CERT_FILE;
-        this.SM_CLIENT_CERT_PASSWORD = SM_CLIENT_CERT_PASSWORD;
-        this.pathVar = pathVar;
+    private static final String SM_TOOLS_DIR = "C:\\Program Files\\DigiCert\\DigiCert One Signing Manager Tools";
+    private static final String SMTOOLS_ARTIFACT = "smtools-windows-x64.msi";
+    private static final String SMCTL_ARTIFACT = "smctl.exe";
+
+    /** Directory of the standalone smctl in simple signing mode. */
+    private String installDir;
+
+    public Windows(TaskListener listener, String SM_HOST, Secret SM_API_KEY, String SM_CLIENT_CERT_FILE,
+            Secret SM_CLIENT_CERT_PASSWORD, String pathVar, SigningConfig config, String workspace) {
+        super(listener, SM_HOST, SM_API_KEY, SM_CLIENT_CERT_FILE, SM_CLIENT_CERT_PASSWORD, pathVar, config, workspace);
+        this.installDir = workspace;
+    }
+
+    @Override
+    protected void addToolPathToEnv(Map<String, String> env) {
+        String existing = System.getenv("path");
+        env.put("path", (existing == null ? "" : existing) + ";" + SM_TOOLS_DIR + ";" + installDir + ";");
+    }
+
+    @Override
+    public Integer call(String os) throws IOException {
+        if (config.isSimpleSigningMode()) {
+            return simpleSigningSetup(os);
+        }
+        return fullSetup(os);
+    }
+
+    // ------------------------------------------------------------------
+    // Simple signing mode: only smctl is downloaded.
+    // ------------------------------------------------------------------
+
+    private Integer simpleSigningSetup(String os) {
+        this.listener.getLogger().println("\nAgent type: " + os + " (simple signing mode)");
+        String url = cdnUrl(SMCTL_ARTIFACT);
+        if (url == null) {
+            return 1;
+        }
+        File smctl = new File(baseDir, SMCTL_ARTIFACT);
+        Integer rc = downloadAndVerify(SMCTL_ARTIFACT, url, smctl, "smctlWindowsSha256");
+        if (rc != 0) {
+            return rc;
+        }
+        installDir = baseDir;
+        this.exportedPath = this.pathVar + ";" + installDir + ";";
+        this.listener.getLogger().println("\nsmctl successfully installed\n");
+        this.setupSucceeded = true;
+        return simpleSign(smctl.getAbsolutePath());
+    }
+
+    // ------------------------------------------------------------------
+    // Full setup: smtools msi + nuget/signtool/jarsigner.
+    // ------------------------------------------------------------------
+
+    private Integer fullSetup(String os) throws IOException {
+        Integer result = install(os);
+        if (result == 0) {
+            this.listener.getLogger().println("\nSMCTL Installation Complete\n");
+            // Ensure smctl (from the MSI) and jarsigner (from the agent JDK) are on PATH
+            // immediately, even if the auxiliary tool setup below fails.
+            String jdkBin = jdkBinDir();
+            this.exportedPath = this.pathVar + ";" + SM_TOOLS_DIR + ";" + installDir
+                    + (jdkBin != null ? ";" + jdkBin : "") + ";";
+        } else {
+            this.listener.getLogger().println("\nSMCTL Installation Failed\n");
+            return result;
+        }
+
+        this.listener.getLogger().println("\nCreating PKCS11 Config File\n");
+        String str = "name=signingmanager\n" +
+                "library = \"C:\\\\Program Files\\\\DigiCert\\\\DigiCert One Signing Manager Tools\\\\smpkcs11.dll\"\n"
+                + "slotListIndex=0\n";
+        String configPath = getConfigProperty("configPath");
+        if (configPath == null) {
+            this.listener.error("Missing configPath in configuration");
+            return 1;
+        }
+        result = createFile(configPath, str);
+        if (result == 0) {
+            this.listener.getLogger()
+                    .println("\nPKCS11 config file successfully created at location: " + configPath + "\n");
+        } else {
+            this.listener.getLogger().println("\nFailed to create PKCS11 config file\n");
+            return result;
+        }
+
+        result = signing();
+        if (result != 0) {
+            // Auxiliary signing tools (nuget/signtool/jsign) failed to install, but
+            // smctl from the MSI is already installed and on PATH. Setup can continue;
+            // only smctl-based signing and the healthcheck are required for most flows.
+            this.listener.getLogger().println("\nWARNING: One or more auxiliary signing tools (nuget/signtool)"
+                    + " failed to install. smctl is still available. Continuing.\n");
+        }
+
+        // smctl is installed with the smtools bundle and is on the PATH.
+        this.setupSucceeded = true;
+        return simpleSign(new File(SM_TOOLS_DIR, SMCTL_ARTIFACT).getAbsolutePath());
     }
 
     public Integer install(String os) {
         this.listener.getLogger().println("\nAgent type: " + os);
-        String downloadUrl = String
-                .format("https://%s/signingmanager/api-ui/v1/releases/noauth/smtools-windows-x64.msi/download",
-                        SM_HOST.trim().substring(19).replaceAll("/$", ""));
-        this.listener.getLogger()
-                .println("\nInstalling SMCTL from: " + downloadUrl);
-        result = executeCommand("curl -X GET  " + downloadUrl + " -o smtools-windows-x64.msi");
+        String url = cdnUrl(SMTOOLS_ARTIFACT);
+        if (url == null) {
+            return 1;
+        }
+        File installer = new File(dir, SMTOOLS_ARTIFACT);
+        Integer result = downloadAndVerify(SMTOOLS_ARTIFACT, url, installer, "smtoolsWindowsSha256");
         if (result != 0) {
             return result;
         }
-        result = executeCommand("msiexec /i smtools-windows-x64.msi /quiet /qn");
+        result = executeCommand(Arrays.asList("msiexec", "/i", installer.getAbsolutePath(), "/quiet", "/qn"));
         if (SM_API_KEY != null && SM_CLIENT_CERT_FILE != null && SM_CLIENT_CERT_PASSWORD != null) {
-            executeCommand(
-                    "C:\\Windows\\System32\\certutil.exe -csp \"DigiCert Signing Manager KSP\" -key -user > NUL 2> NUL");
-            executeCommand("smksp_cert_sync.exe > NUL 2> NUL");
-            executeCommand("smctl windows certsync > NUL 2> NUL");
+            executeCommand(Arrays.asList("C:\\Windows\\System32\\certutil.exe", "-csp",
+                    "DigiCert Signing Manager KSP", "-key", "-user"), true);
+            executeCommand(Arrays.asList(new File(SM_TOOLS_DIR, "smksp_cert_sync.exe").getAbsolutePath()), true);
+            executeCommand(Arrays.asList(new File(SM_TOOLS_DIR, SMCTL_ARTIFACT).getAbsolutePath(),
+                    "windows", "certsync"), true);
         }
         return result;
     }
 
-    public Integer createFile(String path, String str) {
-
-        File file = new File(path); // initialize File object and passing path as argument
-        FileOutputStream fos = null;
-        try {
-            if (!file.createNewFile())
-                ;
-            try {
-                String name = file.getCanonicalPath();
-                fos = new FileOutputStream(name, false); // true for append mode
-                byte[] b = str.getBytes(StandardCharsets.UTF_8); // converts string into bytes
-                fos.write(b); // writes bytes into file
-                fos.close(); // close the file
-                return 0;
-            } catch (Exception e) {
-                if (fos != null)
-                    fos.close();
-                e.printStackTrace(this.listener.error(e.getMessage()));
-                return 1;
-            }
-        } catch (IOException e) {
-            e.printStackTrace(this.listener.error(e.getMessage()));
-            return 1;
-        }
-    }
-
     public List<Path> findByFileName(Path path, String fileName) throws IOException {
-
         List<Path> result;
         try (Stream<Path> pathStream = Files.find(path,
                 Integer.MAX_VALUE,
@@ -121,223 +160,173 @@ public class Windows {
     }
 
     public String findNewestFolder() throws IOException {
-        String signtoolFolder;
-        try (InputStream input = Windows.class.getResourceAsStream("config.properties")) {
-
-            Properties prop = new Properties();
-            prop.load(input);
-
-            signtoolFolder = prop.getProperty("signtoolFolder");
-
-        } catch (IOException e) {
-            e.printStackTrace(this.listener.error(e.getMessage()));
+        String signtoolFolder = getConfigProperty("signtoolFolder");
+        if (signtoolFolder == null) {
             return "";
         }
         Path parentFolder = Paths.get(signtoolFolder);
-        Optional<File> mostRecentFolder = Arrays
-                .stream(parentFolder.toFile().listFiles())
-                .filter(f -> f.isDirectory())
-                .max(
-                        (f1, f2) -> Long.compare(f1.lastModified(),
-                                f2.lastModified()));
-        if (mostRecentFolder.isPresent()) {
-            File mostRecent = mostRecentFolder.get();
-            return mostRecent.getPath();
-        } else {
+        File[] children = parentFolder.toFile().listFiles();
+        if (children == null) {
             this.listener.getLogger().println("Signtool folder is empty");
             return "";
         }
-    }
-
-    public void setEnvVar(String key, String value) {
-        try {
-            Jenkins instance = null;
-            try {
-                instance = Jenkins.get();
-            } catch (IllegalStateException e) {
-                this.listener.getLogger().println("Could not set environment variable: " + key + " with value: " + value
-                        + ". This is due to the plugin running on a slave node. This will have to be manually defined in the pipeline as an environment variable.");
-                return;
-            }
-
-            if (instance != null) {
-                DescribableList<NodeProperty<?>, NodePropertyDescriptor> globalNodeProperties = instance
-                        .getGlobalNodeProperties();
-                List<EnvironmentVariablesNodeProperty> envVarsNodePropertyList = globalNodeProperties
-                        .getAll(EnvironmentVariablesNodeProperty.class);
-
-                EnvironmentVariablesNodeProperty newEnvVarsNodeProperty = null;
-                EnvVars envVars = null;
-
-                if (envVarsNodePropertyList == null || envVarsNodePropertyList.size() == 0) {
-                    newEnvVarsNodeProperty = new hudson.slaves.EnvironmentVariablesNodeProperty();
-                    globalNodeProperties.add(newEnvVarsNodeProperty);
-                    envVars = newEnvVarsNodeProperty.getEnvVars();
-                } else {
-                    envVars = envVarsNodePropertyList.get(0).getEnvVars();
-                }
-                envVars.put(key, value);
-                instance.save();
-            }
-
-        } catch (IOException e) {
-            e.printStackTrace(this.listener.error(e.getMessage()));
+        Optional<File> mostRecentFolder = Arrays.stream(children)
+                .filter(File::isDirectory)
+                .max((f1, f2) -> Long.compare(f1.lastModified(), f2.lastModified()));
+        if (mostRecentFolder.isPresent()) {
+            return mostRecentFolder.get().getPath();
         }
-    }
-
-    public Integer executeCommand(String command) {
-        int exitCode;
-        try {
-            processBuilder.command(prompt, c + "c", command);
-            Map<String, String> env = processBuilder.environment();
-            if (SM_API_KEY != null)
-                env.put(Constants.API_KEY_ID, SM_API_KEY);
-            if (SM_CLIENT_CERT_PASSWORD != null)
-                env.put(Constants.CLIENT_CERT_PASSWORD_ID, SM_CLIENT_CERT_PASSWORD);
-            if (SM_CLIENT_CERT_FILE != null)
-                env.put(Constants.CLIENT_CERT_FILE_ID, SM_CLIENT_CERT_FILE);
-            if (SM_HOST != null)
-                env.put(Constants.HOST_ID, SM_HOST);
-            env.put("path",
-                    System.getenv("path") + ";C:\\Program Files\\DigiCert\\DigiCert One Signing Manager Tools;");
-            processBuilder.directory(new File(dir));
-            processBuilder.redirectErrorStream(true);
-            Process process = processBuilder.start();
-
-            BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
-
-            String line;
-
-            while ((line = reader.readLine()) != null) {
-                this.listener.getLogger().println(line);
-            }
-            exitCode = process.waitFor();
-            reader.close();
-        } catch (IOException e) {
-            e.printStackTrace(this.listener.error(e.getMessage()));
-            return 1;
-        } catch (InterruptedException e) {
-            e.printStackTrace(this.listener.error(e.getMessage()));
-            return 1;
-        } catch (Exception e) {
-            e.printStackTrace(this.listener.error(e.getMessage()));
-            return 1;
-        }
-        return exitCode;
+        this.listener.getLogger().println("Signtool folder is empty");
+        return "";
     }
 
     public Integer signing() {
-        String nugetUrl;
-        String signtoolUrl;
         try {
             this.listener.getLogger()
                     .println("\nInstalling and configuring signing tools - Jarsigner, Signtool and Nuget\n");
-            // Windows.class.getResource("config.properties");
-            try (InputStream input = Windows.class.getResourceAsStream("config.properties")) {
+            String nugetUrl = getConfigProperty("nugetUrl");
+            String signtoolUrl = getConfigProperty("signtoolUrl");
 
-                Properties prop = new Properties();
-
-                prop.load(input);
-
-                nugetUrl = prop.getProperty("nugetUrl");
-                // this.listener.getLogger().println(prop.getProperty("nugetUrl"));
-                signtoolUrl = prop.getProperty("signtoolUrl");
-                // this.listener.getLogger().println(prop.getProperty("signtoolUrl"));
-            } catch (IOException e) {
-                e.printStackTrace(this.listener.error(e.getMessage()));
-                return 1;
-            }
-            result = executeCommand("curl -X GET " + nugetUrl + " -o nuget.exe > NUL");
-
-            if (result == 0)
-                this.listener.getLogger().println("\nNuget successfully installed\n");
-            else {
-                this.listener.getLogger().println("\nNuget failed to install\n");
-                return 1;
-            }
-            executeCommand("curl -X GET " + signtoolUrl + " -o winsdksetup.exe > NUL");
-            result = executeCommand("winsdksetup.exe /norestart /quiet");
-
-            if (result == 0)
-                this.listener.getLogger().println("\nSigntool successfully installed\n");
-            else {
-                this.listener.getLogger().println("\nSigntool failed to install\n");
-                return 1;
+            // --- Nuget (best effort) ---
+            if (nugetUrl != null) {
+                File nuget = new File(dir, "nuget.exe");
+                if (downloadAndVerify("nuget", nugetUrl, nuget, "nugetSha256") == 0) {
+                    this.listener.getLogger()
+                            .println("\nNuget successfully installed at " + nuget.getAbsolutePath() + "\n");
+                } else {
+                    this.listener.getLogger().println("\nNuget failed to install (continuing)\n");
+                }
             }
 
-            String signtoolFolder = findNewestFolder();
-            if (signtoolFolder.equals(""))
-                return 1;
-            else
-                ;
-            Path path = Paths.get(signtoolFolder);
-            List<Path> paths = findByFileName(path, "signtool.exe");
-            ListIterator<Path> iter = paths.listIterator();
-            String[] signtoolPaths = new String[2];
-            while (iter.hasNext()) {
-                String s = (iter.next()).toString();
-                if ((s.substring(30)).contains("x64"))
-                    signtoolPaths[0] = s.substring(0, s.length() - 13);
-                if ((s.substring(30)).contains("x86"))
-                    signtoolPaths[1] = s.substring(0, s.length() - 13);
+            // --- Signtool (best effort: install if possible, then locate) ---
+            if (signtoolUrl != null) {
+                File winsdk = new File(dir, "winsdksetup.exe");
+                if (downloadAndVerify("signtool", signtoolUrl, winsdk, "signtoolSha256") == 0) {
+                    Integer rc = executeCommand(Arrays.asList(winsdk.getAbsolutePath(), "/norestart", "/quiet"));
+                    if (rc == 0) {
+                        this.listener.getLogger().println("\nSigntool installer completed\n");
+                    } else {
+                        this.listener.getLogger().println("\nSigntool installer returned exit code " + rc
+                                + " (it may already be installed). Will try to locate an existing signtool.\n");
+                    }
+                } else {
+                    this.listener.getLogger()
+                            .println("\nSigntool download failed; will try to locate an existing signtool.\n");
+                }
             }
-            setEnvVar("PATH", this.pathVar + ";" + dir + ";" + signtoolPaths[0] + ";" + signtoolPaths[1]
-                    + ";C:\\Program Files\\DigiCert\\DigiCert One Signing Manager Tools;");
-            this.listener.getLogger().println("\nJarsigner successfully installed\n");
-            this.listener.getLogger().println("\nSigning tools installation and configuration complete\n");
 
-            executeCommand("set " + "path=%path%;" + dir + ";" + signtoolPaths[0] + ";" + signtoolPaths[1] +
-                    " & smctl windows certsync > NUL 2> NUL");
+            // Locate signtool whether freshly installed or pre-existing on the agent.
+            String[] signtoolPaths = locateSigntoolDirs();
+
+            // smctl's "Signtool 32 bit" healthcheck looks for an executable literally
+            // named "signtool_32"; the SDK only ships "signtool.exe" in the x86 folder.
+            // Create the alias in-place (same dir preserves its DLL dependencies) so the
+            // 32-bit tool maps too.
+            if (signtoolPaths[1] != null) {
+                try {
+                    File x86Signtool = new File(signtoolPaths[1], "signtool.exe");
+                    File alias = new File(signtoolPaths[1], "signtool_32.exe");
+                    if (x86Signtool.isFile() && !alias.isFile()) {
+                        Files.copy(x86Signtool.toPath(), alias.toPath());
+                        this.listener.getLogger()
+                                .println("\nCreated signtool_32.exe alias for smctl 32-bit mapping\n");
+                    }
+                } catch (Exception ex) {
+                    this.listener.getLogger()
+                            .println("Could not create signtool_32.exe alias: " + ex.getMessage());
+                }
+            }
+
+            // --- jarsigner comes from the agent's own JDK ---
+            String jdkBin = jdkBinDir();
+            if (jdkBin != null) {
+                this.listener.getLogger().println("\nJarsigner located in JDK: " + jdkBin + "\n");
+            } else {
+                this.listener.getLogger().println("\nJarsigner not found: the Jenkins agent is running on a JRE"
+                        + " without jarsigner, or java.home is unset. Install a JDK on the agent to sign .jar files.\n");
+            }
+
+            // Build the PATH exported to subsequent pipeline steps. Directories only.
+            StringBuilder sb = new StringBuilder();
+            sb.append(this.pathVar);
+            sb.append(";").append(SM_TOOLS_DIR);
+            sb.append(";").append(dir);
+            if (jdkBin != null) {
+                sb.append(";").append(jdkBin);
+            }
+            if (signtoolPaths[0] != null) {
+                sb.append(";").append(signtoolPaths[0]);
+            }
+            if (signtoolPaths[1] != null) {
+                sb.append(";").append(signtoolPaths[1]);
+            }
+            sb.append(";");
+            this.exportedPath = sb.toString();
+
+            this.listener.getLogger().println("\nSigning tools configuration complete\n");
+
+            executeCommand(Arrays.asList(new File(SM_TOOLS_DIR, SMCTL_ARTIFACT).getAbsolutePath(),
+                    "windows", "certsync"), true);
         } catch (Exception e) {
-            e.printStackTrace(this.listener.error(e.getMessage()));
+            this.listener.error("Exception while installing auxiliary signing tools: "
+                    + e.getClass().getName() + ": " + e.getMessage());
+            e.printStackTrace(this.listener.getLogger());
             return 1;
         }
         return 0;
     }
 
-    public Integer call(String os) throws IOException {
-
-        result = install(os);
-
-        if (result == 0)
-            this.listener.getLogger().println("\nSMCTL Installation Complete\n");
-        else {
-            this.listener.getLogger().println("\nSMCTL Installation Failed\n");
-            return result;
+    /** Locates x64 and x86 {@code signtool.exe} directories under the Windows Kits bin folder. */
+    private String[] locateSigntoolDirs() {
+        String[] dirs = new String[2]; // [0]=x64, [1]=x86
+        try {
+            String signtoolFolder = findNewestFolder();
+            if (signtoolFolder.isEmpty()) {
+                return dirs;
+            }
+            List<Path> paths = findByFileName(Paths.get(signtoolFolder), "signtool.exe");
+            for (Path p : paths) {
+                String lower = p.toString().toLowerCase();
+                Path parent = p.getParent();
+                if (parent == null) {
+                    continue;
+                }
+                if (lower.contains("\\x64\\")) {
+                    dirs[0] = parent.toString();
+                } else if (lower.contains("\\x86\\")) {
+                    dirs[1] = parent.toString();
+                }
+            }
+            if (dirs[0] != null || dirs[1] != null) {
+                this.listener.getLogger()
+                        .println("\nSigntool located (x64=" + dirs[0] + ", x86=" + dirs[1] + ")\n");
+            } else {
+                this.listener.getLogger().println("\nSigntool not found under " + signtoolFolder + "\n");
+            }
+        } catch (Exception e) {
+            this.listener.getLogger().println("Could not locate signtool: " + e.getMessage());
         }
+        return dirs;
+    }
 
-        this.listener.getLogger().println("\nCreating PKCS11 Config File\n");
-
-        String str = "name=signingmanager\n" +
-                "library = \"C:\\\\Program Files\\\\DigiCert\\\\DigiCert One Signing Manager Tools\\\\smpkcs11.dll\"\n"
-                +
-                "slotListIndex=0\n";
-
-        String configPath;
-        try (InputStream input = Windows.class.getResourceAsStream("config.properties")) {
-
-            Properties prop = new Properties();
-            prop.load(input);
-
-            configPath = prop.getProperty("configPath");
-
-        } catch (IOException e) {
-            e.printStackTrace(this.listener.error(e.getMessage()));
-            return 1;
+    /** @return the agent JDK's bin directory if it contains jarsigner, else {@code null}. */
+    private String jdkBinDir() {
+        String javaHome = System.getProperty("java.home");
+        if (javaHome == null) {
+            return null;
         }
-        result = createFile(configPath, str);
-
-        if (result == 0)
-            this.listener.getLogger()
-                    .println("\nPKCS11 config file successfully created at location: " + configPath + "\n");
-        else {
-            this.listener.getLogger().println("\nFailed to create PKCS11 config file\n");
-            return result;
+        File bin = new File(javaHome, "bin");
+        if (new File(bin, "jarsigner.exe").isFile()) {
+            return bin.getAbsolutePath();
         }
-
-        // signing
-        result = signing();
-        return result;
+        // java.home may point at a JRE nested inside a JDK; check the parent's bin.
+        File parent = new File(javaHome).getParentFile();
+        if (parent != null) {
+            File parentBin = new File(parent, "bin");
+            if (new File(parentBin, "jarsigner.exe").isFile()) {
+                return parentBin.getAbsolutePath();
+            }
+        }
+        return null;
     }
 }

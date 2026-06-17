@@ -10,248 +10,158 @@
 
 package io.jenkins.plugins.digicert;
 
-import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.nio.charset.StandardCharsets;
-import java.util.List;
+import java.util.Arrays;
 import java.util.Map;
-import java.util.Properties;
 
-import hudson.EnvVars;
 import hudson.model.TaskListener;
-import hudson.slaves.EnvironmentVariablesNodeProperty;
-import hudson.slaves.NodeProperty;
-import hudson.slaves.NodePropertyDescriptor;
-import hudson.util.DescribableList;
-import jenkins.model.Jenkins;
+import hudson.util.Secret;
 
-public class Linux {
-    private final TaskListener listener;
-    private final String SM_HOST;
-    // lgtm[jenkins/plaintext-storage]
-    private final String SM_API_KEY;
-    private final String SM_CLIENT_CERT_FILE;
-    // lgtm[jenkins/plaintext-storage]
-    private final String SM_CLIENT_CERT_PASSWORD;
-    private final String pathVar;
-    private final String prompt = "bash";
-    private final char c = '-';
-    String dir = System.getProperty("user.dir");
-    ProcessBuilder processBuilder = new ProcessBuilder();
-    private Integer result;
+public class Linux extends BaseAgent {
 
-    public Linux(TaskListener listener, String SM_HOST, String SM_API_KEY, String SM_CLIENT_CERT_FILE,
-            String SM_CLIENT_CERT_PASSWORD, String pathVar) {
-        this.listener = listener;
-        this.SM_HOST = SM_HOST;
-        this.SM_API_KEY = SM_API_KEY;
-        this.SM_CLIENT_CERT_FILE = SM_CLIENT_CERT_FILE;
-        this.SM_CLIENT_CERT_PASSWORD = SM_CLIENT_CERT_PASSWORD;
-        this.pathVar = pathVar;
+    private static final String SMTOOLS_ARTIFACT = "smtools-linux-x64.tar.gz";
+    private static final String SMTOOLS_DIR_NAME = "smtools-linux-x64";
+    private static final String SMCTL_ARTIFACT = "smctl";
+
+    /** Directory that should be placed on the PATH for child processes. */
+    private String installDir;
+
+    public Linux(TaskListener listener, String SM_HOST, Secret SM_API_KEY, String SM_CLIENT_CERT_FILE,
+            Secret SM_CLIENT_CERT_PASSWORD, String pathVar, SigningConfig config, String workspace) {
+        super(listener, SM_HOST, SM_API_KEY, SM_CLIENT_CERT_FILE, SM_CLIENT_CERT_PASSWORD, pathVar, config, workspace);
+        this.installDir = workspace;
     }
 
-    public Integer install(String os) {
-        this.listener.getLogger().println("\nAgent type: " + os);
-        String downloadUrl = String.format(
-                "https://%s/signingmanager/api-ui/v1/releases/noauth/smtools-linux-x64.tar.gz/download",
-                SM_HOST.trim().substring(19).replaceAll("/$", ""));
-        this.listener.getLogger()
-                .println("\nInstalling SMCTL from: " + downloadUrl);
-        result = executeCommand("curl -X GET " + downloadUrl + " -o smtools-linux-x64.tar.gz");
-        if (result != 0) {
-            return result;
-        }
-        result = executeCommand("tar xvf smtools-linux-x64.tar.gz > /dev/null");
-        dir = dir + File.separator + "smtools-linux-x64";
-        return result;
+    @Override
+    protected void addToolPathToEnv(Map<String, String> env) {
+        String existing = System.getenv("PATH");
+        env.put("PATH", (existing == null ? "" : existing) + ":" + installDir);
     }
 
-    public Integer createFile(String path, String str) {
-
-        File file = new File(path); // initialize File object and passing path as argument
-        FileOutputStream fos = null;
-        try {
-            if (!file.createNewFile()) // creates a new file
-                ;
-            try {
-                String name = file.getCanonicalPath();
-                fos = new FileOutputStream(name, false); // true for append mode
-                byte[] b = str.getBytes(StandardCharsets.UTF_8); // converts string into bytes
-                fos.write(b); // writes bytes into file
-                fos.close(); // close the file
-                return 0;
-            } catch (IOException e) {
-                if (fos != null)
-                    fos.close();
-                e.printStackTrace(this.listener.error(e.getMessage()));
-                return 1;
-            }
-        } catch (IOException e) {
-            e.printStackTrace(this.listener.error(e.getMessage()));
-            return 1;
+    @Override
+    public Integer call(String os) {
+        if (config.isSimpleSigningMode()) {
+            return simpleSigningSetup(os);
         }
+        return fullSetup(os);
     }
 
-    public void setEnvVar(String key, String value) {
-        try {
-            Jenkins instance = null;
-            try {
-                instance = Jenkins.get();
-            } catch (IllegalStateException e) {
-                this.listener.getLogger().println("Could not set environment variable: " + key + " with value: " + value
-                        + ". This is due to the plugin running on a slave node. This will have to be manually defined in the pipeline as an environment variable.");
-                return;
-            }
+    // ------------------------------------------------------------------
+    // Simple signing mode: only smctl is downloaded.
+    // ------------------------------------------------------------------
 
-            if (instance != null) {
-                DescribableList<NodeProperty<?>, NodePropertyDescriptor> globalNodeProperties = instance
-                        .getGlobalNodeProperties();
-                List<EnvironmentVariablesNodeProperty> envVarsNodePropertyList = globalNodeProperties
-                        .getAll(EnvironmentVariablesNodeProperty.class);
-
-                EnvironmentVariablesNodeProperty newEnvVarsNodeProperty = null;
-                EnvVars envVars = null;
-
-                if (envVarsNodePropertyList == null || envVarsNodePropertyList.size() == 0) {
-                    newEnvVarsNodeProperty = new hudson.slaves.EnvironmentVariablesNodeProperty();
-                    globalNodeProperties.add(newEnvVarsNodeProperty);
-                    envVars = newEnvVarsNodeProperty.getEnvVars();
-                } else {
-                    // We do have a envVars List
-                    envVars = envVarsNodePropertyList.get(0).getEnvVars();
-                }
-                envVars.put(key, value);
-                instance.save();
-            }
-        } catch (IOException e) {
-            e.printStackTrace(this.listener.error(e.getMessage()));
+    private Integer simpleSigningSetup(String os) {
+        this.listener.getLogger().println("\nAgent type: " + os + " (simple signing mode)");
+        String url = cdnUrl(SMCTL_ARTIFACT);
+        if (url == null) {
+            return 1;
         }
+        File smctl = new File(baseDir, SMCTL_ARTIFACT);
+        Integer rc = downloadAndVerify(SMCTL_ARTIFACT, url, smctl, "smctlLinuxSha256");
+        if (rc != 0) {
+            return rc;
+        }
+        if (!smctl.setExecutable(true, false)) {
+            this.listener.error("Failed to mark smctl as executable");
+            return 1;
+        }
+        installDir = baseDir;
+        this.exportedPath = this.pathVar + ":" + installDir;
+        this.listener.getLogger().println("\nsmctl successfully installed\n");
+        this.setupSucceeded = true;
+        return simpleSign(smctl.getAbsolutePath());
     }
 
-    public Integer signing() {
-        String jsignUrl;
-        InputStream input = null;
-        try {
-            input = Linux.class.getResourceAsStream("config.properties");
-            Properties prop = new Properties();
+    // ------------------------------------------------------------------
+    // Full setup: smtools bundle + jsign/jarsigner.
+    // ------------------------------------------------------------------
 
-            // load a properties file from class path, inside static method
-            prop.load(input);
-
-            // get the property value and print it out
-            jsignUrl = prop.getProperty("jsignUrl");
-            input.close();
-            // this.listener.getLogger().println(prop.getProperty("jsignUrl"));
-        } catch (Exception e) {
-            try {
-                if (input != null)
-                    input.close();
-            } catch (IOException ex) {
-                ex.printStackTrace(this.listener.error(ex.getMessage()));
-                return 1;
-            }
-            e.printStackTrace(this.listener.error(e.getMessage()));
-            return 1;
-        }
-        try {
-            this.listener.getLogger().println("\nInstalling and configuring signing tools - Jarsigner and Jsign\n");
-            result = executeCommand(
-                    "curl -fSslL " + jsignUrl + " -o jsign.deb && sudo dpkg --install jsign.deb > /dev/null");
-            if (result == 0)
-                this.listener.getLogger().println("\nJsign successfully installed\n");
-            else {
-                this.listener.getLogger().println("\nJsign failed to install\n");
-                return 1;
-            }
-            this.listener.getLogger().println("\nJarsigner successfully installed\n");
-            result = executeCommand("sudo chmod -R +x " + dir);
-            if (result == 0)
-                this.listener.getLogger().println("\nSigning tools installation and configuration complete\n");
-            else {
-                this.listener.getLogger().println("\nFailed to configure signing tools\n");
-                return 1;
-            }
-            setEnvVar("PATH", this.pathVar + ":/" + dir);
-            return 0;
-        } catch (Exception e) {
-            e.printStackTrace(this.listener.error(e.getMessage()));
-            return 1;
-        }
-    }
-
-    public Integer executeCommand(String command) {
-
-        try {
-            processBuilder.command(prompt, c + "c", command);
-            Map<String, String> env = processBuilder.environment();
-            if (SM_API_KEY != null)
-                env.put(Constants.API_KEY_ID, SM_API_KEY);
-            if (SM_CLIENT_CERT_PASSWORD != null)
-                env.put(Constants.CLIENT_CERT_PASSWORD_ID, SM_CLIENT_CERT_PASSWORD);
-            if (SM_CLIENT_CERT_FILE != null)
-                env.put(Constants.CLIENT_CERT_FILE_ID, SM_CLIENT_CERT_FILE);
-            if (SM_HOST != null)
-                env.put(Constants.HOST_ID, SM_HOST);
-            env.put("PATH", System.getenv("PATH") + ":/" + dir + "/smtools-linux-x64/");
-            processBuilder.directory(new File(dir));
-            processBuilder.redirectErrorStream(true);
-            Process process = processBuilder.start();
-
-            BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
-
-            String line;
-
-            while ((line = reader.readLine()) != null) {
-                this.listener.getLogger().println(line);
-            }
-            int exitCode = process.waitFor();
-            reader.close();
-            return exitCode;
-        } catch (IOException e) {
-            e.printStackTrace(this.listener.error(e.getMessage()));
-            return 1;
-        } catch (InterruptedException e) {
-            e.printStackTrace(this.listener.error(e.getMessage()));
-            return 1;
-        } catch (Exception e) {
-            e.printStackTrace(this.listener.error(e.getMessage()));
-            return 1;
-        }
-    }
-
-    public Integer call(String os) throws IOException {
-
-        result = install(os);
-        if (result == 0)
+    private Integer fullSetup(String os) {
+        Integer result = install(os);
+        if (result == 0) {
             this.listener.getLogger().println("\nSMCTL Installation Complete\n");
-        else {
+        } else {
             this.listener.getLogger().println("\nSMCTL Installation Failed\n");
             return result;
         }
 
         this.listener.getLogger().println("\nCreating PKCS11 Config File\n");
         String str = "name=signingmanager\n" +
-                "library=" + dir + "/smpkcs11.so\n" +
+                "library=" + installDir + "/smpkcs11.so\n" +
                 "slotListIndex=0\n";
-        String configPath = dir + File.separator + "pkcs11properties.cfg";
-
+        String configPath = installDir + File.separator + "pkcs11properties.cfg";
         result = createFile(configPath, str);
-
-        if (result == 0)
+        if (result == 0) {
             this.listener.getLogger()
                     .println("\nPKCS11 config file successfully created at location: " + configPath + "\n");
-        else {
+        } else {
             this.listener.getLogger().println("\nFailed to create PKCS11 config file\n");
             return result;
         }
 
-        // signing
         result = signing();
+        if (result != 0) {
+            return result;
+        }
+
+        // smctl ships inside the smtools bundle and is on the PATH, so honour a
+        // signing request issued in the same step.
+        this.setupSucceeded = true;
+        return simpleSign("smctl");
+    }
+
+    public Integer install(String os) {
+        this.listener.getLogger().println("\nAgent type: " + os);
+        String url = cdnUrl(SMTOOLS_ARTIFACT);
+        if (url == null) {
+            return 1;
+        }
+        File archive = new File(baseDir, SMTOOLS_ARTIFACT);
+        Integer result = downloadAndVerify(SMTOOLS_ARTIFACT, url, archive, "smtoolsLinuxSha256");
+        if (result != 0) {
+            return result;
+        }
+        result = executeCommand(Arrays.asList("tar", "xf", archive.getAbsolutePath()), true);
+        installDir = baseDir + File.separator + SMTOOLS_DIR_NAME;
+        dir = installDir;
         return result;
+    }
+
+    public Integer signing() {
+        String jsignUrl = getConfigProperty("jsignUrl");
+        if (jsignUrl == null || !jsignUrl.startsWith("https://")) {
+            this.listener.error("Invalid or missing jsignUrl in configuration");
+            return 1;
+        }
+        try {
+            this.listener.getLogger().println("\nInstalling and configuring signing tools - Jarsigner and Jsign\n");
+            File jsignJar = new File(installDir, "jsign.jar");
+            Integer rc = downloadAndVerify("jsign", jsignUrl, jsignJar, "jsignSha256");
+            if (rc != 0) {
+                this.listener.getLogger().println("\nJsign failed to install\n");
+                return 1;
+            }
+            // Create a user-owned wrapper so "jsign" is available on PATH without root/sudo.
+            File wrapper = new File(installDir, "jsign");
+            String wrapperScript = "#!/bin/sh\nexec java -jar \"" + jsignJar.getAbsolutePath() + "\" \"$@\"\n";
+            if (createFile(wrapper.getAbsolutePath(), wrapperScript) != 0 || !wrapper.setExecutable(true, false)) {
+                this.listener.getLogger().println("\nJsign failed to install\n");
+                return 1;
+            }
+            this.listener.getLogger().println("\nJsign successfully installed\n");
+            this.listener.getLogger().println("\nJarsigner successfully installed\n");
+            rc = executeCommand(Arrays.asList("chmod", "-R", "+x", installDir));
+            if (rc == 0) {
+                this.listener.getLogger().println("\nSigning tools installation and configuration complete\n");
+            } else {
+                this.listener.getLogger().println("\nFailed to configure signing tools\n");
+                return 1;
+            }
+            this.exportedPath = this.pathVar + ":" + installDir;
+            return 0;
+        } catch (Exception e) {
+            e.printStackTrace(this.listener.error(e.getMessage()));
+            return 1;
+        }
     }
 }
