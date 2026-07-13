@@ -26,7 +26,7 @@ PKCS#11 integrations.
 
 - Automatically provides required environment variables to subsequent pipeline stages.
 
-- Supports `SHA-256 `verification of downloaded artifacts.
+- Supports `SHA-256` verification of downloaded artifacts.
 
 - Supports alternate download sources for restricted or air-gapped
 environments.
@@ -192,7 +192,7 @@ the signature.
 
 ## Documentation
 
-For comprehensive installation, configuration, and usage guidance, see
+For comprehensive installation, configuration, and usage guidance, see: [Jenkins plugin for keypair signing](https://docs.digicert.com/en/software-trust-manager/ci-cd-integrations-and-deployment-pipelines/plugins/jenkins/install-client-tools-for-gpg-keypair-signing-on-jenkins.html)
 
 Jenkins plugin for keypair signing
 
