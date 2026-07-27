@@ -43,8 +43,12 @@ public class Windows extends BaseAgent {
 
     @Override
     protected void addToolPathToEnv(Map<String, String> env) {
-        String existing = System.getenv("path");
-        env.put("path", (existing == null ? "" : existing) + ";" + SM_TOOLS_DIR + ";" + installDir + ";");
+        // On Windows the environment map is case-insensitive; use the canonical "PATH"
+        // key and fall back to "Path" when reading the current value.
+        String existing = System.getenv("PATH");
+        if (existing == null) existing = System.getenv("Path");
+        if (existing == null) existing = "";
+        env.put("PATH", existing + ";" + SM_TOOLS_DIR + ";" + installDir + ";");
     }
 
     @Override
@@ -265,8 +269,17 @@ public class Windows extends BaseAgent {
 
             this.listener.getLogger().println("\nSigning tools configuration complete\n");
 
-            executeCommand(Arrays.asList(new File(SM_TOOLS_DIR, SMCTL_ARTIFACT).getAbsolutePath(),
-                    "windows", "certsync"), true);
+            // certsync populates the Windows certificate store and only works when the
+            // signing credentials are present. Skip it (and surface a non-zero exit code)
+            // otherwise, to avoid spamming logs and hiding real failures.
+            if (SM_API_KEY != null && SM_CLIENT_CERT_FILE != null && SM_CLIENT_CERT_PASSWORD != null) {
+                Integer certsyncRc = executeCommand(Arrays.asList(new File(SM_TOOLS_DIR, SMCTL_ARTIFACT).getAbsolutePath(),
+                        "windows", "certsync"), true);
+                if (certsyncRc != 0) {
+                    this.listener.getLogger().println("\nWARNING: 'smctl windows certsync' returned exit code "
+                            + certsyncRc + "; the Windows certificate store may not be fully populated.\n");
+                }
+            }
         } catch (Exception e) {
             this.listener.error("Exception while installing auxiliary signing tools: "
                     + e.getClass().getName() + ": " + e.getMessage());

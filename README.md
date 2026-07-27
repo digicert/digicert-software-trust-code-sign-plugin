@@ -50,7 +50,7 @@ pipeline step.
 
 - Supports setup and signing in a single pipeline step.
 
-When both `input`and `keypairAlias` are provided, the step installs the
+When both `input` and `keypairAlias` are provided, the step installs the
 required tools and signs the specified files in a single invocation. A
 separate signing stage is not required.
 
@@ -109,7 +109,7 @@ This release maintains compatibility with existing Jenkins pipelines.
 
 - Existing pipelines that use the setup step only do not require changes.
 
-- When `input`and `keypairAlias`are not provided, the step installs and
+- When `input` and `keypairAlias` are not provided, the step installs and
 configures the signing tools without performing signing.
 
 - Existing Jenkins credential IDs remain supported.
@@ -117,7 +117,7 @@ configures the signing tools without performing signing.
 - Existing traditional signing workflows can continue to use KSP and
 PKCS#11 integrations.
 
-- Manual `PATH `configuration is no longer required for subsequent stages.
+- Manual `PATH` configuration is no longer required for subsequent stages.
 
 ## Parameters
 

@@ -74,6 +74,12 @@ public class AgentInfo extends MasterToSlaveCallable<Map<String, String>, Throwa
         if (clientCertFileBytes != null && clientCertFileBytes.length > 0) {
             File tempCert = File.createTempFile("sm-client-cert-", ".p12");
             tempCert.deleteOnExit();
+            // Restrict the private certificate to the owner only (best-effort) BEFORE
+            // writing its bytes, so other local users on a shared agent cannot read it.
+            tempCert.setReadable(false, false);
+            tempCert.setWritable(false, false);
+            tempCert.setReadable(true, true);
+            tempCert.setWritable(true, true);
             try (FileOutputStream fos = new FileOutputStream(tempCert)) {
                 fos.write(clientCertFileBytes);
             }
@@ -111,11 +117,17 @@ public class AgentInfo extends MasterToSlaveCallable<Map<String, String>, Throwa
         if (SM_CLIENT_CERT_PASSWORD != null) resolvedEnv.put(Constants.CLIENT_CERT_PASSWORD_ID, SM_CLIENT_CERT_PASSWORD.getPlainText());
         if (agent.exportedPath != null) resolvedEnv.put("PATH", agent.exportedPath);
 
-        // Only a genuine SETUP failure (smctl install / PKCS11 config) should fail the
-        // step. A non-zero signing exit code does not nullify the result, mirroring the
-        // behaviour where setup succeeds and signing reports its own outcome.
+        // A genuine SETUP failure (smctl install / PKCS11 config) fails the step.
         if (!agent.setupSucceeded)
             return null; // signals setup failure to Pipeline
+
+        // When signing was explicitly requested, honour fail-fast semantics: a non-zero
+        // signing exit code fails the step unless the caller opted into
+        // zeroExitCodeOnFailure.
+        if (config.isSigningRequested() && result != null && result != 0 && !config.isZeroExitCodeOnFailure()) {
+            listener.error("Signing failed with exit code " + result);
+            return null;
+        }
         return resolvedEnv;
     }
 }
